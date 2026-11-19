@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mini VR</title>
+<style>
+  html,body{margin:0;height:100%;background:#070a16;color:#e8ecf5;font-family:system-ui,-apple-system,Segoe UI,sans-serif;overflow:hidden}
+  canvas{display:block;touch-action:none}
+  #card{position:fixed;left:20px;bottom:20px;max-width:380px;padding:22px 24px;border-radius:18px;
+    background:rgba(14,20,42,.72);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+    border:1px solid rgba(140,170,255,.18);box-shadow:0 20px 60px rgba(0,0,0,.45)}
+  #card.hidden{display:none}
+  h1{margin:0 0 4px;font-size:26px;font-weight:650;letter-spacing:-.01em}
+  .sub{margin:0 0 14px;font-size:13px;opacity:.6}
+  ul{margin:0 0 16px;padding:0;list-style:none;font-size:14px;line-height:1.45}
+  li{padding:6px 0;border-top:1px solid rgba(255,255,255,.07)}
+  li b{color:#9fc0ff;font-weight:600}
+  #enter{width:100%;padding:13px 0;font-size:17px;font-weight:600;border:0;border-radius:12px;
+    background:linear-gradient(135deg,#5b8cff,#9a6bff);color:#fff;cursor:pointer}
+  #enter:disabled{background:#2c3550;color:#9aa3bb;cursor:default}
+  #msg{margin-top:10px;font-size:12.5px;opacity:.75;line-height:1.4}
+</style>
+<script type="importmap">
+{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
+</head>
+<body>
+<div id="card">
+  <h1>Mini VR</h1>
+  <p class="sub">Handspårning · kast · xylofon · tyngdlöshet</p>
+  <ul>
+    <li><b>Händer:</b> nyp med tumme och pekfinger för att greppa. Tryck på knapparna och slå på xylofonen med fingret.</li>
+    <li><b>Handkontroller:</b> trigger eller grip greppar. Vänster spak går, höger spak vrider.</li>
+    <li><b>Mål:</b> kasta formerna på måltavlorna. Mitten ger 3 poäng.</li>
+  </ul>
+  <button id="enter" disabled>Kollar VR-stöd…</button>
+  <div id="msg">På datorn: dra för att titta runt, klicka på saker för att testa.</div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+
+const V3 = THREE.Vector3;
+const UP = new V3(0,1,0);
+const tv = new V3(), tv2 = new V3(), head = new V3();
+const tq = new THREE.Quaternion(), tq2 = new THREE.Quaternion(), Q0 = new THREE.Quaternion();
+const M = new THREE.Matrix4(), S = new V3(), C = new V3(), D = new V3();
+
+/* ---------- renderer, scen, kamera ---------- */
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x000000, 10, 45);
+const rig = new THREE.Group(); scene.add(rig);
+const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, .03, 150);
+rig.add(camera);
+camera.position.set(0,1.7,1.25);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0,1,-.6);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI*.52;
+controls.update();
+
+/* ---------- ljud ---------- */
+let ac=null, master=null;
+function audio(){
+  if(!ac){
+    try{ ac = new (window.AudioContext||window.webkitAudioContext)(); master = ac.createGain(); master.gain.value=.8; master.connect(ac.destination);}catch(e){ return null; }
+  }
+  if(ac.state==='suspended') ac.resume();
+  return ac;
+}
+function tone(f,{dur=.5,type='sine',vol=.2,attack=.004,slide=0}={}){
+  const a=ac; if(!a) return;
+  const t=a.currentTime, o=a.createOscillator(), g=a.createGain();
+  o.type=type; o.frequency.setValueAtTime(f,t);
+  if(slide) o.frequency.exponentialRampToValueAtTime(f*slide,t+dur);
+  g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(vol,t+attack);
+  g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+  o.connect(g).connect(master); o.start(t); o.stop(t+dur+.05);
+}
+const marimba = f => { tone(f,{dur:1.2,vol:.3}); tone(f*4,{dur:.2,vol:.07}); tone(f*2.01,{dur:.45,vol:.05,type:'triangle'}); };
+const sfx = {
+  grab: ()=>tone(1200,{dur:.06,vol:.08,type:'triangle'}),
+  click:()=>{ tone(900,{dur:.05,vol:.12,type:'square'}); tone(1400,{dur:.08,vol:.05}); },
+  thud: k=>tone(110+60*k,{dur:.18,vol:.15*k+.05,slide:.5}),
+  hit:  big=>{ const b=big?784:523; tone(b,{dur:.5,vol:.2,type:'triangle'}); setTimeout(()=>tone(b*1.5,{dur:.6,vol:.18,type:'triangle'}),90); if(big) setTimeout(()=>tone(b*2,{dur:.8,vol:.16,type:'triangle'}),180); },
+};
+
+/* ---------- himmel, ljus, miljö ---------- */
+const skyU = {top:{value:new THREE.Color()},hor:{value:new THREE.Color()},bot:{value:new THREE.Color()}};
+const sky = new THREE.Mesh(new THREE.SphereGeometry(80,32,16), new THREE.ShaderMaterial({
+  side:THREE.BackSide, depthWrite:false, fog:false, uniforms:skyU,
+  vertexShader:'varying vec3 vP; void main(){ vP=normalize(position); gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+  fragmentShader:['uniform vec3 top,hor,bot; varying vec3 vP;',
+    'void main(){ float h=vP.y; vec3 c = h>0.0 ? mix(hor,top,pow(h,.55)) : mix(hor,bot,pow(-h,.4));',
+    'gl_FragColor=vec4(c,1.0);',
+    '#include <colorspace_fragment>',
+    '}'].join(String.fromCharCode(10))
+}));
+scene.add(sky);
+
+const hemi = new THREE.HemisphereLight(0xffffff,0x222222,1); scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xffffff,1);
+sun.position.set(2.5,6,2); sun.castShadow = true;
+sun.shadow.mapSize.set(1024,1024);
+Object.assign(sun.shadow.camera,{left:-3,right:3,top:3,bottom:-3,near:1,far:15});
+sun.shadow.bias = -.0005; sun.shadow.normalBias = .02;
+sun.target.position.set(0,.8,-.5);
+scene.add(sun, sun.target);
+
+const floorMat = new THREE.MeshStandardMaterial({color:0x1c2442,roughness:.95});
+const floor = new THREE.Mesh(new THREE.CircleGeometry(18,72).rotateX(-Math.PI/2), floorMat);
+floor.receiveShadow = true; scene.add(floor);
+const pad = new THREE.Mesh(new THREE.CircleGeometry(1.7,64).rotateX(-Math.PI/2),
+  new THREE.MeshStandardMaterial({color:0x2a3563,roughness:.6,metalness:.2}));
+pad.position.y=.003; pad.receiveShadow=true; scene.add(pad);
+const ringMat = new THREE.MeshStandardMaterial({color:0x6f9bff,emissive:0x4f7dff,emissiveIntensity:1.2});
+const padRing = new THREE.Mesh(new THREE.TorusGeometry(1.7,.012,8,96).rotateX(Math.PI/2), ringMat);
+padRing.position.y=.006; scene.add(padRing);
+
+// stjärnor
+const starGeo = new THREE.BufferGeometry(), sp=[];
+for(let i=0;i<900;i++){ const a=Math.random()*Math.PI*2, b=Math.asin(Math.random()*.95+.03), r=70;
+  sp.push(Math.cos(a)*Math.cos(b)*r, Math.sin(b)*r, Math.sin(a)*Math.cos(b)*r); }
+starGeo.setAttribute('position',new THREE.Float32BufferAttribute(sp,3));
+const stars = new THREE.Points(starGeo,new THREE.PointsMaterial({color:0xffffff,size:.22,fog:false,transparent:true,opacity:.9}));
+scene.add(stars);
+
+// mjuk prick-textur
+function dotTex(){ const c=document.createElement('canvas'); c.width=c.height=64; const x=c.getContext('2d');
+  const g=x.createRadialGradient(32,32,0,32,32,32); g.addColorStop(0,'rgba(255,255,255,1)'); g.addColorStop(.35,'rgba(255,255,255,.5)'); g.addColorStop(1,'rgba(255,255,255,0)');
+  x.fillStyle=g; x.fillRect(0,0,64,64); const t=new THREE.CanvasTexture(c); t.colorSpace=THREE.SRGBColorSpace; return t; }
+// eldflugor
+const FF=140, ffGeo=new THREE.BufferGeometry(), ffPos=new Float32Array(FF*3), ffSeed=[];
+for(let i=0;i<FF;i++){ ffSeed.push([ (Math.random()-.5)*14, .3+Math.random()*3, (Math.random()-.5)*14, Math.random()*10 ]); }
+ffGeo.setAttribute('position',new THREE.BufferAttribute(ffPos,3));
+const fireflies = new THREE.Points(ffGeo,new THREE.PointsMaterial({map:dotTex(),color:0xfff2a8,size:.09,transparent:true,depthWrite:false,blending:THREE.AdditiveBlending}));
+fireflies.frustumCulled=false; scene.add(fireflies);
+
+// kristaller runt om
+const crystals=[];
+const crystalCols=[0x6f9bff,0xb978ff,0x35d3e6,0xff7ad9,0x4fdc8f];
+for(let i=0;i<11;i++){
+  const a=i/11*Math.PI*2+.3, r=9+Math.random()*4, h=1.2+Math.random()*2.4, col=crystalCols[i%5];
+  const m=new THREE.Mesh(new THREE.OctahedronGeometry(1,0), new THREE.MeshStandardMaterial({color:col,emissive:col,emissiveIntensity:.6,roughness:.2,metalness:.3,flatShading:true}));
+  m.scale.set(.35+Math.random()*.3,h,.35+Math.random()*.3);
+  m.position.set(Math.cos(a)*r,h*.9,Math.sin(a)*r);
+  m.userData.spin=(Math.random()-.5)*.3;
+  scene.add(m); crystals.push(m);
+}
+
+/* ---------- teman ---------- */
+const THEMES = {
+  night:{top:0x050816,hor:0x27347a,bot:0x06070d,fog:0x141b3d,hemi:[0x8fa8ff,0x151a2c,.6],sun:[0xb8ccff,1.1],floor:0x1c2442,pad:0x2a3563,stars:true,glow:.16,crystal:.9,exp:1.15},
+  day:{top:0x2f74d6,hor:0xd6ebff,bot:0x55664c,fog:0xcfe5fb,hemi:[0xe3f0ff,0x6a5a44,1.1],sun:[0xfff0d8,2.8],floor:0x6f8763,pad:0xb9c0cf,stars:false,glow:0,crystal:.25,exp:1}
+};
+let theme='night', baseGlow=.16;
+function applyTheme(n){
+  theme=n; const t=THEMES[n];
+  skyU.top.value.setHex(t.top); skyU.hor.value.setHex(t.hor); skyU.bot.value.setHex(t.bot);
+  scene.fog.color.setHex(t.fog);
+  hemi.color.setHex(t.hemi[0]); hemi.groundColor.setHex(t.hemi[1]); hemi.intensity=t.hemi[2];
+  sun.color.setHex(t.sun[0]); sun.intensity=t.sun[1];
+  floorMat.color.setHex(t.floor); pad.material.color.setHex(t.pad);
+  stars.visible=t.stars; fireflies.visible=t.stars;
+  crystals.forEach(c=>c.material.emissiveIntensity=t.crystal);
+  ringMat.emissiveIntensity = t.stars?1.2:.3;
+  baseGlow=t.glow; renderer.toneMappingExposure=t.exp;
+}
+
+/* ---------- canvas-text ---------- */
+function labelCanvas(w,h){ const c=document.createElement('canvas'); c.width=w; c.height=h; const t=new THREE.CanvasTexture(c); t.colorSpace=THREE.SRGBColorSpace; t.anisotropy=4; return {c,x:c.getContext('2d'),t}; }
+
+/* ---------- bord ---------- */
+const TOP=.8, TABLE={x:0,z:-.62,hw:.65,hd:.3};
+const wood = new THREE.MeshStandardMaterial({color:0x8a6244,roughness:.55});
+const table = new THREE.Mesh(new RoundedBoxGeometry(1.3,.06,.6,4,.02), wood);
+table.position.set(TABLE.x,TOP-.03,TABLE.z); table.castShadow=table.receiveShadow=true; scene.add(table);
+const legMat = new THREE.MeshStandardMaterial({color:0x2b2f3d,roughness:.4,metalness:.6});
+[[-.58,-.24],[.58,-.24],[-.58,.24],[.58,.24]].forEach(([x,z])=>{
+  const l=new THREE.Mesh(new THREE.CylinderGeometry(.018,.018,TOP-.06,12),legMat);
+  l.position.set(x,(TOP-.06)/2,TABLE.z+z); l.castShadow=true; scene.add(l);
+});
+
+/* ---------- former ---------- */
+const items=[];
+const SHAPES=[
+  r=>new THREE.SphereGeometry(r,32,20),
+  r=>new RoundedBoxGeometry(r*1.5,r*1.5,r*1.5,3,r*.25),
+  r=>new THREE.OctahedronGeometry(r*1.15),
+  r=>new THREE.TorusKnotGeometry(r*.58,r*.2,96,14),
+  r=>new THREE.IcosahedronGeometry(r*1.05,0),
+  r=>new THREE.CylinderGeometry(r*.8,r*.8,r*1.5,28),
+];
+const COLORS=[0xff5d73,0xffb547,0x4fdc8f,0x4f8cff,0xb978ff,0x35d3e6,0xff7ad9,0xf4e86b];
+function spawnItem(pos){
+  const k=items.length, r=.045+Math.random()*.02, col=COLORS[k%COLORS.length];
+  const m=new THREE.Mesh(SHAPES[k%SHAPES.length](r), new THREE.MeshStandardMaterial({color:col,roughness:.28,metalness:.12,emissive:col,emissiveIntensity:0}));
+  m.castShadow=m.receiveShadow=true; m.position.copy(pos);
+  m.rotation.set(Math.random()*3,Math.random()*3,0);
+  m.userData={vel:new V3(),ang:new V3(),r,held:null,home:pos.clone(),cool:0,tcool:0};
+  scene.add(m); items.push(m); return m;
+}
+for(let i=0;i<10;i++) spawnItem(new V3(-.48+(i%5)*.24, TOP+.12, TABLE.z+(i<5?-.11:.11)));
+
+/* ---------- xylofon ---------- */
+const NOTES=[523.25,587.33,659.25,698.46,783.99,880,987.77,1046.5];
+const xylo=new THREE.Group(); xylo.position.set(.8,.86,-.4); xylo.rotation.y=-.55; scene.add(xylo);
+const xBase=new THREE.Mesh(new RoundedBoxGeometry(.46,.03,.3,3,.01),new THREE.MeshStandardMaterial({color:0x3b2a20,roughness:.7}));
+xBase.castShadow=xBase.receiveShadow=true; xylo.add(xBase);
+[[-.19,0],[.19,0]].forEach(([x])=>{ const l=new THREE.Mesh(new THREE.CylinderGeometry(.015,.015,.86,10),legMat); l.position.set(x,-.43,0); l.castShadow=true; xylo.add(l); });
+const bars=[];
+NOTES.forEach((f,k)=>{
+  const len=.27-k*.013, col=new THREE.Color().setHSL(k/8*.85,.75,.58);
+  const b=new THREE.Mesh(new RoundedBoxGeometry(.042,.018,len,2,.006),new THREE.MeshStandardMaterial({color:col,emissive:col,emissiveIntensity:0,roughness:.35,metalness:.25}));
+  b.position.set(-.17+k*.0486,.025,0); b.castShadow=true;
+  b.userData={len,flash:0,k}; xylo.add(b); bars.push(b);
+});
+const XTOP=.034;
+
+/* ---------- knappanel ---------- */
+let zeroG=false, score=0, best=0;
+try{ best=+localStorage.getItem('minivr-best')||0; }catch(e){}
+const panel=new THREE.Group(); panel.position.set(-.8,1.0,-.42); panel.rotation.set(-.6,.55,0,'YXZ'); scene.add(panel);
+const pBoard=new THREE.Mesh(new RoundedBoxGeometry(.5,.32,.03,3,.012),new THREE.MeshStandardMaterial({color:0x1d2338,roughness:.5,metalness:.4}));
+pBoard.position.z=-.015; pBoard.castShadow=true; panel.add(pBoard);
+const post=new THREE.Mesh(new THREE.CylinderGeometry(.02,.03,1,12),legMat); post.position.set(-.8,.5,-.42); post.castShadow=true; scene.add(post);
+
+const BTN_DEF=[
+  {label:()=> 'Återställ', color:'#4f8cff', fn:resetAll},
+  {label:()=> zeroG?'Tyngdlöst: PÅ':'Tyngdlöst: AV', color:'#9a6bff', fn:()=>{ zeroG=!zeroG; if(zeroG) items.forEach(it=>{ if(!it.userData.held){ it.userData.vel.y+=.5+Math.random()*.5; it.userData.ang.set(Math.random()-.5,Math.random()-.5,Math.random()-.5).multiplyScalar(2);} }); }},
+  {label:()=> theme==='night'?'Dag':'Natt', color:'#f0a030', fn:()=>applyTheme(theme==='night'?'day':'night')},
+  {label:()=> 'Fler former', color:'#2fbf74', fn:()=>{ for(let k=0;k<3&&items.length<30;k++) spawnItem(new V3((Math.random()-.5)*.9,TOP+.35+k*.12,TABLE.z+(Math.random()-.5)*.3)); }},
+];
+const buttons=[];
+BTN_DEF.forEach((d,i)=>{
+  const bx=i%2?.115:-.115, by=i<2?.068:-.068;
+  const L=labelCanvas(256,128);
+  const cap=new THREE.Mesh(new RoundedBoxGeometry(.2,.1,.03,3,.012),new THREE.MeshStandardMaterial({color:new THREE.Color(d.color),roughness:.4}));
+  const face=new THREE.Mesh(new THREE.PlaneGeometry(.185,.088),new THREE.MeshBasicMaterial({map:L.t,toneMapped:false}));
+  face.position.z=.0155; cap.add(face);
+  cap.position.set(bx,by,.015); cap.castShadow=true; panel.add(cap);
+  const btn={d,cap,L,bx,by,press:0,latched:false,clickT:0};
+  drawBtn(btn); buttons.push(btn);
+});
+function drawBtn(b){
+  const {x,c,t}=b.L; x.clearRect(0,0,c.width,c.height);
+  x.fillStyle=b.d.color; x.fillRect(0,0,c.width,c.height);
+  const g=x.createLinearGradient(0,0,0,c.height); g.addColorStop(0,'rgba(255,255,255,.22)'); g.addColorStop(1,'rgba(0,0,0,.12)');
+  x.fillStyle=g; x.fillRect(0,0,c.width,c.height);
+  x.fillStyle='#fff'; x.font='600 34px system-ui,Segoe UI,sans-serif'; x.textAlign='center'; x.textBaseline='middle';
+  x.fillText(b.d.label(),c.width/2,c.height/2+2); t.needsUpdate=true;
+}
+function fireBtn(b,g){ b.d.fn(); buttons.forEach(drawBtn); sfx.click(); if(g) pulse(g,.7,40); }
+
+/* ---------- poängtavla ---------- */
+const board=labelCanvas(1024,400);
+const boardMesh=new THREE.Mesh(new THREE.PlaneGeometry(1.0,.39),new THREE.MeshBasicMaterial({map:board.t,transparent:true,toneMapped:false}));
+boardMesh.position.set(0,1.62,-1.35); scene.add(boardMesh);
+function drawBoard(){
+  const {x,c,t}=board; x.clearRect(0,0,c.width,c.height);
+  x.fillStyle='rgba(12,18,40,.82)'; x.beginPath(); x.roundRect(8,8,c.width-16,c.height-16,40); x.fill();
+  x.strokeStyle='rgba(130,160,255,.45)'; x.lineWidth=4; x.stroke();
+  x.textAlign='center'; x.fillStyle='#9fb8ff'; x.font='600 44px system-ui,Segoe UI,sans-serif'; x.fillText('POÄNG',c.width/2,82);
+  x.fillStyle='#ffffff'; x.font='700 150px system-ui,Segoe UI,sans-serif'; x.fillText(String(score),c.width/2,222);
+  x.fillStyle='#ffd36b'; x.font='600 40px system-ui,Segoe UI,sans-serif'; x.fillText('Rekord: '+best,c.width/2,290);
+  x.fillStyle='rgba(220,230,255,.65)'; x.font='32px system-ui,Segoe UI,sans-serif'; x.fillText('Nyp för att greppa · kasta på måltavlorna',c.width/2,352);
+  t.needsUpdate=true;
+}
+drawBoard();
+
+/* ---------- måltavlor ---------- */
+const targets=[];
+function makeTarget(){
+  const g=new THREE.Group();
+  [.3,.21,.13].forEach((rr,k)=>{
+    const red=k%2===0;
+    g.add(new THREE.Mesh(new THREE.TorusGeometry(rr,.024,12,56),new THREE.MeshStandardMaterial({color:red?0xff4d5e:0xf2f4ff,emissive:red?0xff2040:0x8090ff,emissiveIntensity:.35,roughness:.4})));
+  });
+  const bull=new THREE.Mesh(new THREE.CircleGeometry(.065,32),new THREE.MeshStandardMaterial({color:0xffd34d,emissive:0xffb000,emissiveIntensity:1,side:THREE.DoubleSide}));
+  g.add(bull);
+  const disc=new THREE.Mesh(new THREE.CircleGeometry(.32,48),new THREE.MeshBasicMaterial({color:0x8fb0ff,transparent:true,opacity:.08,side:THREE.DoubleSide,depthWrite:false}));
+  g.add(disc);
+  g.userData={base:new V3(),t:Math.random()*10,pop:0,grow:1};
+  scene.add(g); placeTarget(g); targets.push(g);
+}
+function placeTarget(g){
+  g.userData.base.set((Math.random()-.5)*5.6,1.1+Math.random()*1.3,-3.2-Math.random()*2.4);
+  g.position.copy(g.userData.base); g.lookAt(0,1.4,0);
+}
+for(let i=0;i<3;i++) makeTarget();
+
+/* ---------- popup-text ---------- */
+const popups=[];
+function popup(pos,text,gold){
+  const L=labelCanvas(256,128); L.x.font='800 92px system-ui,Segoe UI,sans-serif'; L.x.textAlign='center'; L.x.textBaseline='middle';
+  L.x.lineWidth=10; L.x.strokeStyle='rgba(0,0,0,.5)'; L.x.strokeText(text,128,64);
+  L.x.fillStyle=gold?'#ffd34d':'#ffffff'; L.x.fillText(text,128,64); L.t.needsUpdate=true;
+  const s=new THREE.Sprite(new THREE.SpriteMaterial({map:L.t,transparent:true,toneMapped:false,depthTest:false}));
+  s.scale.set(.5,.25,1); s.position.copy(pos); s.renderOrder=10; scene.add(s); popups.push({s,life:1.3});
+}
+
+/* ---------- händer och kontroller ---------- */
+const FINGERS=[
+  ['wrist','thumb-metacarpal','thumb-phalanx-proximal','thumb-phalanx-distal','thumb-tip'],
+  ['wrist','index-finger-metacarpal','index-finger-phalanx-proximal','index-finger-phalanx-intermediate','index-finger-phalanx-distal','index-finger-tip'],
+  ['wrist','middle-finger-metacarpal','middle-finger-phalanx-proximal','middle-finger-phalanx-intermediate','middle-finger-phalanx-distal','middle-finger-tip'],
+  ['wrist','ring-finger-metacarpal','ring-finger-phalanx-proximal','ring-finger-phalanx-intermediate','ring-finger-phalanx-distal','ring-finger-tip'],
+  ['wrist','pinky-finger-metacarpal','pinky-finger-phalanx-proximal','pinky-finger-phalanx-intermediate','pinky-finger-phalanx-distal','pinky-finger-tip'],
+];
+const JOINTS=[...new Set(FINGERS.flat())];
+const BONES=[]; FINGERS.forEach(f=>{ for(let k=0;k<f.length-1;k++) BONES.push([f[k],f[k+1]]); });
+
+function makeHandMesh(){
+  const mat=new THREE.MeshStandardMaterial({color:0xc9dcff,emissive:0x3a62c8,emissiveIntensity:.35,roughness:.35,metalness:.1});
+  const joints=new THREE.InstancedMesh(new THREE.SphereGeometry(1,14,10),mat,JOINTS.length);
+  const bones=new THREE.InstancedMesh(new THREE.CylinderGeometry(1,1,1,10),mat,BONES.length);
+  joints.frustumCulled=bones.frustumCulled=false; joints.castShadow=bones.castShadow=true;
+  const grp=new THREE.Group(); grp.add(joints,bones); grp.visible=false; scene.add(grp);
+  return {grp,joints,bones,mat};
+}
+function makeCtrlVisual(color){
+  const g=new THREE.Group();
+  const body=new THREE.Mesh(new RoundedBoxGeometry(.036,.03,.11,3,.012),new THREE.MeshStandardMaterial({color:0x2a2f3d,roughness:.45,metalness:.3}));
+  body.position.z=.03;
+  const ring=new THREE.Mesh(new THREE.TorusGeometry(.036,.006,8,28),new THREE.MeshStandardMaterial({color,emissive:color,emissiveIntensity:.9}));
+  ring.position.set(0,.01,-.035); ring.rotation.x=Math.PI/2.5;
+  const tip=new THREE.Mesh(new THREE.SphereGeometry(.009,12,8),new THREE.MeshBasicMaterial({color:0xffffff}));
+  tip.position.set(0,-.02,-.06);
+  g.add(body,ring,tip); return g;
+}
+
+const grabbers=[];
+for(let i=0;i<2;i++){
+  const ctrl=renderer.xr.getController(i), grip=renderer.xr.getControllerGrip(i), hand=renderer.xr.getHand(i);
+  rig.add(ctrl,grip,hand);
+  const g={i,ctrl,grip,hand,isHand:false,source:null,held:null,offset:new THREE.Matrix4(),
+    anchor:new THREE.Object3D(),prev:new V3(),prevQ:new THREE.Quaternion(),hasPrev:false,
+    vel:new V3(),angVel:new V3(),poke:new V3(),tracked:false,hover:null,snapReady:true,
+    handMesh:makeHandMesh(),visual:makeCtrlVisual(i?0xff7ad9:0x35d3e6),jp:{},jr:{}};
+  grip.add(g.visual); scene.add(g.anchor);
+  ctrl.addEventListener('connected',e=>{ g.source=e.data; g.isHand=!!e.data.hand; g.hasPrev=false; });
+  ctrl.addEventListener('disconnected',()=>{ release(g); g.source=null; g.isHand=false; g.tracked=false; });
+  ctrl.addEventListener('selectstart',()=>grab(g));
+  ctrl.addEventListener('selectend',()=>release(g));
+  ctrl.addEventListener('squeezestart',()=>grab(g));
+  ctrl.addEventListener('squeezeend',()=>release(g));
+  grabbers.push(g);
+}
+function pulse(g,i,ms){ try{ g.source?.gamepad?.hapticActuators?.[0]?.pulse(i,ms); }catch(e){} }
+
+function grab(g){
+  if(g.held||!g.tracked) return;
+  let bestIt=null, bd=g.isHand?.07:.1;
+  for(const it of items){ const d=it.position.distanceTo(g.anchor.position)-it.userData.r; if(d<bd){bd=d;bestIt=it;} }
+  if(!bestIt) return;
+  const other=bestIt.userData.held; if(other) other.held=null;
+  bestIt.updateMatrixWorld(); g.anchor.updateMatrixWorld();
+  g.offset.copy(g.anchor.matrixWorld).invert().multiply(bestIt.matrixWorld);
+  bestIt.userData.held=g; g.held=bestIt;
+  pulse(g,.5,25); sfx.grab();
+}
+function release(g){
+  const it=g.held; if(!it) return;
+  it.userData.held=null; g.held=null;
+  it.userData.vel.copy(g.vel).multiplyScalar(1.25);
+  if(it.userData.vel.length()>16) it.userData.vel.setLength(16);
+  it.userData.ang.copy(g.angVel);
+}
+
+function updateGrabber(g,dt){
+  g.tracked=false;
+  if(g.isHand){
+    const J=g.hand.joints, t=J['thumb-tip'], ix=J['index-finger-tip'], w=J['wrist'];
+    if(t&&ix&&w&&ix.visible){
+      t.getWorldPosition(tv); ix.getWorldPosition(g.poke);
+      g.anchor.position.copy(tv).add(g.poke).multiplyScalar(.5);
+      w.getWorldQuaternion(g.anchor.quaternion);
+      g.tracked=true;
+    }
+  } else if(g.source && g.grip.visible){
+    g.grip.getWorldPosition(g.anchor.position); g.grip.getWorldQuaternion(g.anchor.quaternion);
+    g.poke.set(0,-.02,-.06).applyQuaternion(g.anchor.quaternion).add(g.anchor.position);
+    g.tracked=true;
+  }
+  g.visual.visible=!g.isHand;
+  if(!g.tracked){ g.hasPrev=false; if(g.held) release(g); return; }
+  g.anchor.updateMatrixWorld(true);
+  if(g.hasPrev&&dt>0){
+    tv.subVectors(g.anchor.position,g.prev).divideScalar(dt); g.vel.lerp(tv,.5);
+    tq.copy(g.anchor.quaternion).multiply(tq2.copy(g.prevQ).invert());
+    if(tq.w<0){tq.x=-tq.x;tq.y=-tq.y;tq.z=-tq.z;tq.w=-tq.w;}
+    const ang=2*Math.acos(Math.min(1,tq.w)), s=Math.sqrt(Math.max(0,1-tq.w*tq.w));
+    if(s>1e-4) tv.set(tq.x/s,tq.y/s,tq.z/s).multiplyScalar(ang/dt); else tv.set(0,0,0);
+    g.angVel.lerp(tv,.4);
+  }
+  g.prev.copy(g.anchor.position); g.prevQ.copy(g.anchor.quaternion); g.hasPrev=true;
+
+  if(g.held){
+    M.multiplyMatrices(g.anchor.matrixWorld,g.offset);
+    M.decompose(g.held.position,g.held.quaternion,S);
+    g.held.userData.vel.copy(g.vel);
+  }
+
+  // spakar (bara handkontroller)
+  const gp=g.source?.gamepad;
+  if(!g.isHand&&gp&&gp.axes.length>=4){
+    const x=gp.axes[2], y=gp.axes[3];
+    if(g.source.handedness==='left'){
+      if(Math.abs(x)>.15||Math.abs(y)>.15){
+        camera.getWorldDirection(D); D.y=0; D.normalize();
+        tv.crossVectors(D,UP);
+        rig.position.addScaledVector(D,-y*2*dt).addScaledVector(tv,x*2*dt);
+      }
+    } else {
+      if(Math.abs(x)>.7&&g.snapReady){
+        g.snapReady=false; const a=-Math.sign(x)*Math.PI/6;
+        camera.getWorldPosition(head);
+        rig.position.sub(head).applyAxisAngle(UP,a).add(head); rig.rotation.y+=a;
+      } else if(Math.abs(x)<.3) g.snapReady=true;
+    }
+  }
+}
+
+function updateHandMesh(g){
+  const h=g.handMesh, J=g.hand.joints;
+  if(!g.isHand||!g.tracked){ h.grp.visible=false; return; }
+  h.grp.visible=true;
+  JOINTS.forEach((n,k)=>{
+    const j=J[n]; if(!j) return;
+    const p=g.jp[n]||(g.jp[n]=new V3()); j.getWorldPosition(p);
+    const r=j.jointRadius||.008; g.jr[n]=r;
+    M.compose(p,Q0,S.set(r,r,r)); h.joints.setMatrixAt(k,M);
+  });
+  BONES.forEach(([a,b],k)=>{
+    const pa=g.jp[a], pb=g.jp[b]; if(!pa||!pb) return;
+    D.subVectors(pb,pa); const len=D.length(); if(len<1e-5) return;
+    tq.setFromUnitVectors(UP,D.divideScalar(len));
+    const rad=Math.min(g.jr[a],g.jr[b])*.8;
+    C.addVectors(pa,pb).multiplyScalar(.5);
+    M.compose(C,tq,S.set(rad,len,rad)); h.bones.setMatrixAt(k,M);
+  });
+  h.joints.instanceMatrix.needsUpdate=h.bones.instanceMatrix.needsUpdate=true;
+  const want=g.held?1.1:(g.hover?.7:.35);
+  h.mat.emissiveIntensity+= (want-h.mat.emissiveIntensity)*.3;
+}
+
+/* ---------- interaktion: knappar, xylofon ---------- */
+const panelInv=new THREE.Matrix4();
+function updateButtons(pokers,dt){
+  panel.updateMatrixWorld(); panelInv.copy(panel.matrixWorld).invert();
+  for(const b of buttons){
+    let depth=0, by=null;
+    for(const pk of pokers){
+      tv.copy(pk.p).applyMatrix4(panelInv);
+      if(Math.abs(tv.x-b.bx)<.105&&Math.abs(tv.y-b.by)<.055&&tv.z<.05&&tv.z>-.03){
+        const d=.03-(tv.z-pk.r); if(d>depth){depth=d;by=pk.g;}
+      }
+    }
+    if(b.clickT>0){ b.clickT-=dt; depth=Math.max(depth,.018); }
+    b.press=THREE.MathUtils.clamp(depth,0,.018);
+    b.cap.position.z=.015-b.press;
+    if(b.press>.012&&!b.latched){ b.latched=true; fireBtn(b,by); }
+    if(b.press<.004) b.latched=false;
+  }
+}
+let strikePrev=new Set(), strikeNow=new Set();
+function updateXylo(strikers,dt){
+  strikeNow.clear();
+  xylo.updateMatrixWorld();
+  for(const s of strikers){
+    tv.copy(s.p); xylo.worldToLocal(tv);
+    if(Math.abs(tv.x)>.26||Math.abs(tv.z)>.17||tv.y>.12||tv.y<-.01) continue;
+    for(const bar of bars){
+      if(Math.abs(tv.x-bar.position.x)<.021+s.r*.5&&Math.abs(tv.z)<bar.userData.len/2&&tv.y<XTOP+s.r&&tv.y>0){
+        const key=s.id+':'+bar.userData.k; strikeNow.add(key);
+        if(!strikePrev.has(key)){ marimba(NOTES[bar.userData.k]); bar.userData.flash=1; if(s.g) pulse(s.g,.35,18); }
+      }
+    }
+  }
+  [strikePrev,strikeNow]=[strikeNow,strikePrev];
+  for(const bar of bars){
+    const u=bar.userData; u.flash=Math.max(0,u.flash-dt*3);
+    bar.material.emissiveIntensity=u.flash*.9; bar.position.y=.025-u.flash*.004;
+  }
+}
+
+/* ---------- fysik ---------- */
+function physics(dt){
+  const G=zeroG?0:9.8;
+  for(const it of items){
+    const u=it.userData; u.cool=Math.max(0,u.cool-dt); u.tcool=Math.max(0,u.tcool-dt);
+    if(u.held) continue;
+    const v=u.vel, p=it.position, r=u.r;
+    v.y-=G*dt; if(zeroG) v.multiplyScalar(1-.25*dt);
+    p.addScaledVector(v,dt);
+    const al=u.ang.length();
+    if(al>1e-4){ tq.setFromAxisAngle(tv.copy(u.ang).divideScalar(al),al*dt); it.quaternion.premultiply(tq); u.ang.multiplyScalar(Math.max(0,1-(zeroG?.15:.8)*dt)); }
+    let ground=null;
+    if(p.y<r) ground=0;
+    if(Math.abs(p.x-TABLE.x)<TABLE.hw&&Math.abs(p.z-TABLE.z)<TABLE.hd&&p.y<TOP+r&&p.y>TOP-.06) ground=TOP;
+    tv.copy(p); xylo.worldToLocal(tv);
+    if(Math.abs(tv.x)<.23&&Math.abs(tv.z)<.15&&tv.y<XTOP+r&&tv.y>-.05) ground=xylo.position.y+XTOP;
+    if(ground!==null&&v.y<=0){
+      const impact=-v.y; p.y=ground+r;
+      v.y=impact>.4?impact*.42:0; v.x*=.9; v.z*=.9; u.ang.multiplyScalar(.85);
+      if(impact>1.6&&u.cool<=0){ sfx.thud(Math.min(1,impact/6)); u.cool=.1; }
+      if(!zeroG&&v.lengthSq()<.0025){ v.set(0,0,0); u.ang.multiplyScalar(.5); }
+    }
+    if(zeroG&&p.y>3.8&&v.y>0) v.y*=-.6;
+    if(p.length()>25||p.y<-1){ p.copy(u.home); v.set(0,0,0); u.ang.set(0,0,0); }
+  }
+  for(let a=0;a<items.length;a++) for(let b=a+1;b<items.length;b++){
+    const A=items[a],B=items[b],ua=A.userData,ub=B.userData;
+    if(ua.held&&ub.held) continue;
+    tv.subVectors(B.position,A.position); const d=tv.length(), m=ua.r+ub.r;
+    if(d>=m||d<1e-6) continue;
+    tv.divideScalar(d); const o=m-d;
+    if(ua.held) B.position.addScaledVector(tv,o);
+    else if(ub.held) A.position.addScaledVector(tv,-o);
+    else { A.position.addScaledVector(tv,-o/2); B.position.addScaledVector(tv,o/2); }
+    const rv=tv2.subVectors(ub.vel,ua.vel).dot(tv);
+    if(rv<0){ const e=1.35;
+      if(ua.held) ub.vel.addScaledVector(tv,-e*rv);
+      else if(ub.held) ua.vel.addScaledVector(tv,e*rv);
+      else { ua.vel.addScaledVector(tv,e*rv/2); ub.vel.addScaledVector(tv,-e*rv/2); }
+    }
+  }
+  // träffar på måltavlor
+  for(const it of items){
+    const u=it.userData; if(u.held||u.tcool>0||u.vel.length()<1.2) continue;
+    for(const t of targets){
+      if(t.userData.pop>0||t.userData.grow<1) continue;
+      const d=it.position.distanceTo(t.position);
+      if(d<.32+u.r*.5){
+        const bull=d<.09; score+=bull?3:1;
+        if(score>best){ best=score; try{localStorage.setItem('minivr-best',best);}catch(e){} }
+        u.vel.multiplyScalar(-.25); u.tcool=.5; t.userData.pop=1;
+        popup(t.position.clone().add(tv.set(0,.25,0)),bull?'+3':'+1',bull);
+        sfx.hit(bull); drawBoard(); break;
+      }
+    }
+  }
+}
+
+function resetAll(){
+  items.forEach(it=>{ const u=it.userData; if(u.held){u.held.held=null;u.held=null;} it.position.copy(u.home); u.vel.set(0,0,0); u.ang.set(0,0,0); });
+  score=0; zeroG=false; drawBoard();
+}
+
+/* ---------- huvudloop ---------- */
+const clock=new THREE.Clock();
+function frame(){
+  const dt=Math.min(clock.getDelta(),.04), T=clock.elapsedTime;
+  rig.updateMatrixWorld(true);
+
+  const pokers=[];
+  for(const g of grabbers){
+    updateGrabber(g,dt); updateHandMesh(g);
+    if(g.tracked) pokers.push({id:'g'+g.i,p:g.poke,r:g.isHand?.009:.01,g});
+  }
+  physics(dt);
+
+  // hover-glöd
+  for(const it of items) it.material.emissiveIntensity=baseGlow+(it.userData.held?.35:0);
+  for(const g of grabbers){
+    g.hover=null; if(!g.tracked||g.held) continue;
+    let bd=g.isHand?.07:.1;
+    for(const it of items){ const d=it.position.distanceTo(g.anchor.position)-it.userData.r; if(d<bd){bd=d;g.hover=it;} }
+    if(g.hover) g.hover.material.emissiveIntensity=baseGlow+.45;
+  }
+
+  updateButtons(pokers,dt);
+  const strikers=pokers.slice();
+  for(const it of items) strikers.push({id:it.id,p:it.position,r:it.userData.r,g:it.userData.held});
+  updateXylo(strikers,dt);
+
+  for(const t of targets){
+    const u=t.userData; u.t+=dt;
+    t.position.y=u.base.y+Math.sin(u.t*1.1)*.08;
+    if(u.pop>0){ u.pop-=dt*2; t.scale.setScalar(1+Math.sin((1-Math.max(u.pop,0))*Math.PI)*.4);
+      if(u.pop<=0){ placeTarget(t); u.grow=0; t.scale.setScalar(.01); } }
+    else if(u.grow<1){ u.grow=Math.min(1,u.grow+dt*2.2); const x=u.grow; t.scale.setScalar(1+2.7*Math.pow(x-1,3)+1.7*Math.pow(x-1,2)); }
+  }
+  for(let i=popups.length-1;i>=0;i--){ const p=popups[i]; p.life-=dt; p.s.position.y+=dt*.35; p.s.material.opacity=Math.min(1,p.life*1.5);
+    if(p.life<=0){ scene.remove(p.s); p.s.material.map.dispose(); p.s.material.dispose(); popups.splice(i,1);} }
+
+  if(fireflies.visible){ for(let i=0;i<FF;i++){ const s=ffSeed[i];
+    ffPos[i*3]=s[0]+Math.sin(T*.3+s[3])*.6; ffPos[i*3+1]=s[1]+Math.sin(T*.5+s[3]*2)*.25; ffPos[i*3+2]=s[2]+Math.cos(T*.27+s[3])*.6; }
+    ffGeo.attributes.position.needsUpdate=true; fireflies.material.opacity=.6+.4*Math.sin(T*2); }
+  crystals.forEach(c=>c.rotation.y+=c.userData.spin*dt);
+
+  if(!renderer.xr.isPresenting) controls.update();
+  renderer.render(scene,camera);
+}
+renderer.setAnimationLoop(frame);
+applyTheme('night');
+
+addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+
+/* ---------- skrivbord: klicka för att testa ---------- */
+const ray=new THREE.Raycaster(), mouse=new THREE.Vector2(); let downAt=null;
+renderer.domElement.addEventListener('pointerdown',e=>{ audio(); downAt=[e.clientX,e.clientY]; });
+renderer.domElement.addEventListener('pointerup',e=>{
+  if(!downAt||Math.hypot(e.clientX-downAt[0],e.clientY-downAt[1])>6) return;
+  mouse.set(e.clientX/innerWidth*2-1,-e.clientY/innerHeight*2+1); ray.setFromCamera(mouse,camera);
+  const hits=ray.intersectObjects([...buttons.map(b=>b.cap),...items,...bars],true); if(!hits.length) return;
+  let o=hits[0].object;
+  const b=buttons.find(b=>b.cap===o||b.cap===o.parent); if(b){ b.clickT=.15; return; }
+  if(bars.includes(o)){ marimba(NOTES[o.userData.k]); o.userData.flash=1; return; }
+  if(items.includes(o)){ o.userData.vel.set((Math.random()-.5)*1.5,3.5,-1.5-Math.random()); o.userData.ang.set(Math.random()*6-3,Math.random()*6-3,0); }
+});
+
+/* ---------- gå in i VR ---------- */
+let activeSession=null, refType='local-floor';
+const card=document.getElementById('card'), btn=document.getElementById('enter'), msg=document.getElementById('msg');
+renderer.xr.addEventListener('sessionstart',()=>{ card.classList.add('hidden'); rig.position.set(0,0,0); rig.rotation.set(0,0,0); controls.enabled=false; });
+renderer.xr.addEventListener('sessionend',()=>{ card.classList.remove('hidden'); rig.position.set(0,0,0); rig.rotation.set(0,0,0);
+  camera.position.set(0,1.7,1.25); camera.quaternion.identity(); camera.updateProjectionMatrix(); controls.enabled=true; controls.update(); });
+
+(async()=>{
+  if(!navigator.xr){ btn.textContent='WebXR saknas här'; msg.textContent='Öppna sidan i Meta Quests webbläsare, eller i Chrome/Edge på en Windows-dator med Quest Link igång.'; return; }
+  let ok=false; try{ ok=await navigator.xr.isSessionSupported('immersive-vr'); }catch(e){}
+  if(!ok){ btn.textContent='Inget headset hittat'; msg.textContent='Koppla in Quest via Link och se till att Link-läget är aktivt i headsetet. Ladda sedan om sidan.'; return; }
+  btn.disabled=false; btn.textContent='Gå in i VR';
+  let starting=false;
+  btn.onclick=async()=>{
+    if(starting) return; starting=true; audio();
+    btn.textContent='Startar…'; msg.textContent='';
+    if(activeSession){ try{ await activeSession.end(); }catch(e){} activeSession=null; }
+    let s;
+    try{
+      s=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor','hand-tracking']});
+    }catch(e){ msg.textContent='Steg 1 (starta session) misslyckades: '+e.message; btn.textContent='Gå in i VR'; starting=false; return; }
+    activeSession=s;
+    s.addEventListener('end',()=>{ activeSession=null; });
+    // hitta ett koordinatsystem som headsetet faktiskt stöder
+    let type=null, errs=[];
+    for(const t of ['local-floor','local','viewer']){
+      try{ await s.requestReferenceSpace(t); type=t; break; }catch(e){ errs.push(t+': '+e.message); }
+    }
+    if(!type){ msg.textContent='Steg 2 misslyckades: '+errs.join(' | '); try{ await s.end(); }catch(e){} btn.textContent='Gå in i VR'; starting=false; return; }
+    try{
+      renderer.xr.setReferenceSpaceType(type);
+      await renderer.xr.setSession(s);
+      refType=type;
+      if(type!=='local-floor') rig.position.y=1.6; // ingen golvnivå: lyft scenen till ögonhöjd
+    }catch(e){ msg.textContent='Steg 3 misslyckades: '+e.message; try{ await s.end(); }catch(x){} }
+    btn.textContent='Gå in i VR'; starting=false;
+  };
+})();
+addEventListener('error',e=>{ msg.textContent='Fel: '+e.message; });
+addEventListener('unhandledrejection',e=>{ msg.textContent='Fel: '+(e.reason?.message||e.reason); });
+</script>
+</body>
+</html>
